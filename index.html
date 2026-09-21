@@ -342,12 +342,12 @@ footer.foot{margin-top:14px; font-size:10px; color:var(--text-dim); line-height:
 </header>
 
 <div class="panel">
-  <h2><span class="n">1</span>入力レイヤー</h2>
+  <h2><span class="n">1</span>BPM</h2>
   <div class="sliders" id="sliders"></div>
 </div>
 
 <div class="panel">
-  <h2><span class="n">2</span>感情パッド</h2>
+  <h2><span class="n">2</span>ムード</h2>
   <div class="xy-section">
     <div class="xy-wrap">
       <div class="xy-pad" id="xy-pad">
@@ -432,6 +432,8 @@ footer.foot{margin-top:14px; font-size:10px; color:var(--text-dim); line-height:
       <tr><td class="k">tension(bpm由来)</td><td id="cov-tension">–</td><td class="k">valence/arousal(mood由来)</td><td id="cov-mood">–</td></tr>
       <tr><td class="k">地域(area)</td><td id="cov-area">–</td><td class="k">楽器族</td><td id="cov-instr">–</td></tr>
     </table>
+    <b>連続再生について：</b>
+    Suno埋め込みの外部再生制限により自動送りは行っていません。曲が終わったら「次へ」またはプレイリストの▶で手動で進めてください。
   </div>
 </footer>
 
@@ -740,14 +742,13 @@ function tagString(t){
   return parts.join(" / ") || "(軸データなし)";
 }
 
-/* ---------- 連続再生キュー ---------- */
-const DEFAULT_TAKE_MS = 200000; // durationが無い場合のフォールバック（秒推定不能曲用）
+/* ---------- 連続再生キュー（手動送り。自動タイマーは廃止） ---------- */
 const queuePlayBtn = document.getElementById("btn-queue-play");
 const takeToggleEl = document.getElementById("take-toggle");
 const loopBtn = document.getElementById("btn-loop");
 const nowPlayingEl = document.getElementById("now-playing");
 const npInfo = document.getElementById("np-info");
-const queueState = { active:false, queue:[], index:0, take:"1", loop:false, timer:null };
+const queueState = { active:false, queue:[], index:0, take:"1", loop:false };
 
 function closeOpenPlayer(){
   const openRow = playlistBody.querySelector("tr.player-row");
@@ -773,8 +774,6 @@ function pickTake(t, preferred){
   return { track:t.tracks[idx], idx, fallback: preferred==="2" ? idx!==1 : idx!==0 };
 }
 function stopQueue(){
-  if (queueState.timer) clearTimeout(queueState.timer);
-  queueState.timer = null;
   queueState.active = false;
   closeOpenPlayer();
   nowPlayingEl.hidden = true;
@@ -803,16 +802,12 @@ function playQueueAt(i, guard){
       <div class="player-wrap">
         <div class="player-take" style="flex:1 1 100%">
           <div class="take-label"><span>${label}</span><a href="${SUNO_SONG}${picked.track.id}" target="_blank" rel="noopener">Sunoで開く ↗</a></div>
-          <iframe src="${SUNO_EMBED}${picked.track.id}?autoplay=1" loading="lazy" allow="autoplay; encrypted-media; fullscreen"></iframe>
+          <iframe src="${SUNO_EMBED}${picked.track.id}" loading="lazy" allow="autoplay; encrypted-media; fullscreen"></iframe>
         </div>
       </div>`);
     rowEl.scrollIntoView({behavior:"smooth", block:"nearest"});
   }
   npInfo.textContent = `${i+1} / ${n} ・ ${t.genre_label||t.title}`;
-
-  const ms = (picked.track.dur ? picked.track.dur*1000 : DEFAULT_TAKE_MS) + 1500;
-  if (queueState.timer) clearTimeout(queueState.timer);
-  queueState.timer = setTimeout(()=> playQueueAt(queueState.index + 1), ms);
 }
 function startQueue(){
   const ids = Array.from(playlistBody.querySelectorAll("tr[data-row-id]")).map(tr=>tr.dataset.rowId);
