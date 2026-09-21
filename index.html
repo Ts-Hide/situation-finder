@@ -290,6 +290,32 @@ th.copy-col, td.copy-col{white-space:nowrap; width:1%}
 .copy-btn.done{color:var(--accent-2); border-color:var(--accent-2)}
 .empty{color:var(--text-dim); font-size:13px; padding:14px 0}
 
+.queue-bar{margin-bottom:10px; display:flex; flex-direction:column; gap:8px}
+.queue-row{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.take-toggle{display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden}
+.take-btn{
+  border:none; background:var(--surface-2); color:var(--text-dim);
+  padding:7px 12px; font-size:12px; cursor:pointer; font-family:"JetBrains Mono",monospace;
+}
+.take-btn + .take-btn{border-left:1px solid var(--border)}
+.take-btn.active{background:var(--accent-2); color:var(--accent-ink); font-weight:700}
+.btn.loop-btn{padding:7px 11px; font-size:14px}
+.btn.loop-btn.active{background:var(--accent-2); border-color:var(--accent-2); color:var(--accent-ink)}
+.btn#btn-queue-play.active{background:var(--danger); border-color:var(--danger); color:var(--accent-ink)}
+.now-playing{
+  display:flex; align-items:center; gap:8px;
+  border:1px solid var(--accent-2); border-radius:9px; padding:6px 10px;
+  background:color-mix(in srgb, var(--accent-2) 10%, var(--surface));
+}
+.now-playing[hidden]{display:none}
+.np-btn{
+  border:1px solid var(--border); background:var(--surface); color:var(--text);
+  border-radius:6px; padding:4px 9px; font-size:12px; cursor:pointer;
+}
+.np-info{flex:1; font-size:11.5px; color:var(--text-dim); font-family:"JetBrains Mono",monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+tr.queue-current{outline:2px solid var(--accent-2); outline-offset:-2px}
+tr.queue-current td:first-child{border-left:3px solid var(--accent-2)}
+
 th.play-col, td.play-col{white-space:nowrap; width:1%}
 .play-btn{
   display:inline-block; white-space:nowrap; min-width:44px; text-align:center;
@@ -346,6 +372,24 @@ footer.foot{margin-top:14px; font-size:10px; color:var(--text-dim); line-height:
 
 <div class="panel">
   <h2><span class="n">3</span>出力結果（プレイリスト）</h2>
+
+  <div class="queue-bar">
+    <div class="queue-row">
+      <button class="btn primary" id="btn-queue-play"><span class="emoji">▶</span>連続再生</button>
+      <div class="take-toggle" id="take-toggle">
+        <button class="take-btn active" data-take="1" type="button">Take1</button>
+        <button class="take-btn" data-take="2" type="button">Take2</button>
+      </div>
+      <button class="btn loop-btn" id="btn-loop" type="button" title="プレイリストをループ">🔁</button>
+    </div>
+    <div class="now-playing" id="now-playing" hidden>
+      <button class="np-btn" id="np-prev" type="button" title="前へ">◀</button>
+      <span class="np-info" id="np-info"></span>
+      <button class="np-btn" id="np-next" type="button" title="次へ">▶</button>
+      <button class="np-btn" id="np-stop" type="button" title="停止">■</button>
+    </div>
+  </div>
+
   <div class="table-wrap">
     <table>
       <thead>
@@ -696,7 +740,109 @@ function tagString(t){
   return parts.join(" / ") || "(軸データなし)";
 }
 
+/* ---------- 連続再生キュー ---------- */
+const DEFAULT_TAKE_MS = 200000; // durationが無い場合のフォールバック（秒推定不能曲用）
+const queuePlayBtn = document.getElementById("btn-queue-play");
+const takeToggleEl = document.getElementById("take-toggle");
+const loopBtn = document.getElementById("btn-loop");
+const nowPlayingEl = document.getElementById("now-playing");
+const npInfo = document.getElementById("np-info");
+const queueState = { active:false, queue:[], index:0, take:"1", loop:false, timer:null };
+
+function closeOpenPlayer(){
+  const openRow = playlistBody.querySelector("tr.player-row");
+  if (openRow) openRow.remove();
+  playlistBody.querySelectorAll(".play-btn.open").forEach(b=>{ b.classList.remove("open"); b.textContent="▶"; });
+  playlistBody.querySelectorAll("tr.queue-current").forEach(tr=>tr.classList.remove("queue-current"));
+}
+function insertPlayerRow(rowEl, html){
+  const tr = document.createElement("tr");
+  tr.className = "player-row";
+  const td = document.createElement("td");
+  td.colSpan = 9;
+  td.innerHTML = html;
+  tr.appendChild(td);
+  rowEl.insertAdjacentElement("afterend", tr);
+  return tr;
+}
+function pickTake(t, preferred){
+  if (!t.tracks.length) return null;
+  let idx = preferred==="2" ? 1 : 0;
+  if (!t.tracks[idx]) idx = idx===0 ? 1 : 0;
+  if (!t.tracks[idx]) return null;
+  return { track:t.tracks[idx], idx, fallback: preferred==="2" ? idx!==1 : idx!==0 };
+}
+function stopQueue(){
+  if (queueState.timer) clearTimeout(queueState.timer);
+  queueState.timer = null;
+  queueState.active = false;
+  closeOpenPlayer();
+  nowPlayingEl.hidden = true;
+  queuePlayBtn.classList.remove("active");
+  queuePlayBtn.innerHTML = '<span class="emoji">▶</span>連続再生';
+}
+function playQueueAt(i, guard){
+  guard = guard || 0;
+  const n = queueState.queue.length;
+  if (!n || guard > n + 2){ stopQueue(); return; }
+  if (i < 0) i = queueState.loop ? n - 1 : 0;
+  if (i >= n){ if (queueState.loop) i = 0; else { stopQueue(); return; } }
+
+  const t = queueState.queue[i];
+  const picked = pickTake(t, queueState.take);
+  if (!picked){ playQueueAt(i + 1, guard + 1); return; } // 再生可能なTakeが無い曲はスキップ
+
+  closeOpenPlayer();
+  queueState.index = i;
+
+  const rowEl = playlistBody.querySelector(`tr[data-row-id="${CSS.escape(t.id)}"]`);
+  if (rowEl){
+    rowEl.classList.add("queue-current");
+    const label = `Take${picked.idx+1}${picked.fallback ? `（Take${queueState.take}なし→代替）` : ""}${picked.track.dur ? ` ・ ${Math.round(picked.track.dur)}秒` : ""}`;
+    insertPlayerRow(rowEl, `
+      <div class="player-wrap">
+        <div class="player-take" style="flex:1 1 100%">
+          <div class="take-label"><span>${label}</span><a href="${SUNO_SONG}${picked.track.id}" target="_blank" rel="noopener">Sunoで開く ↗</a></div>
+          <iframe src="${SUNO_EMBED}${picked.track.id}?autoplay=1" loading="lazy" allow="autoplay; encrypted-media; fullscreen"></iframe>
+        </div>
+      </div>`);
+    rowEl.scrollIntoView({behavior:"smooth", block:"nearest"});
+  }
+  npInfo.textContent = `${i+1} / ${n} ・ ${t.genre_label||t.title}`;
+
+  const ms = (picked.track.dur ? picked.track.dur*1000 : DEFAULT_TAKE_MS) + 1500;
+  if (queueState.timer) clearTimeout(queueState.timer);
+  queueState.timer = setTimeout(()=> playQueueAt(queueState.index + 1), ms);
+}
+function startQueue(){
+  const ids = Array.from(playlistBody.querySelectorAll("tr[data-row-id]")).map(tr=>tr.dataset.rowId);
+  const queue = ids.map(id=>TRACKS.find(t=>t.id===id)).filter(t=>t && t.tracks.length);
+  if (!queue.length) return;
+  queueState.queue = queue;
+  queueState.active = true;
+  nowPlayingEl.hidden = false;
+  queuePlayBtn.classList.add("active");
+  queuePlayBtn.innerHTML = '<span class="emoji">■</span>停止';
+  playQueueAt(0);
+}
+queuePlayBtn.addEventListener("click", ()=>{ queueState.active ? stopQueue() : startQueue(); });
+takeToggleEl.querySelectorAll(".take-btn").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    queueState.take = b.dataset.take;
+    takeToggleEl.querySelectorAll(".take-btn").forEach(x=>x.classList.toggle("active", x===b));
+    if (queueState.active) playQueueAt(queueState.index);
+  });
+});
+loopBtn.addEventListener("click", ()=>{
+  queueState.loop = !queueState.loop;
+  loopBtn.classList.toggle("active", queueState.loop);
+});
+document.getElementById("np-next").addEventListener("click", ()=>{ if (queueState.active) playQueueAt(queueState.index + 1); });
+document.getElementById("np-prev").addEventListener("click", ()=>{ if (queueState.active) playQueueAt(queueState.index - 1); });
+document.getElementById("np-stop").addEventListener("click", stopQueue);
+
 function recompute(){
+  stopQueue();
   const {candidates, totalFiltered} = step1();
   statusLine.textContent = totalFiltered===candidates.length
     ? `${candidates.length} / ${TRACKS.length}`
@@ -796,31 +942,20 @@ function recompute(){
   `).join("");
 
   /* ---------- 再生ボタン：行の直下にSuno埋め込みプレイヤーを展開（1件のみ同時展開） ---------- */
-  function closeOpenPlayer(){
-    const openRow = playlistBody.querySelector("tr.player-row");
-    if (openRow) openRow.remove();
-    playlistBody.querySelectorAll(".play-btn.open").forEach(b=>{ b.classList.remove("open"); b.textContent="▶"; });
-  }
   playlistBody.querySelectorAll(".play-btn").forEach(btn=>{
     btn.addEventListener("click", ()=>{
       const id = btn.dataset.id;
       const t = TRACKS.find(x=>x.id===id);
       const wasOpen = btn.classList.contains("open");
-      closeOpenPlayer();
+      stopQueue(); // 手動プレビューを開く際は連続再生を停止（同時再生防止、内部でclosOpenPlayerも実行）
       if (wasOpen) return; // トグルで閉じる
       btn.classList.add("open");
       btn.textContent = "■";
-      const tr = document.createElement("tr");
-      tr.className = "player-row";
-      const td = document.createElement("td");
-      td.colSpan = 9;
-      td.innerHTML = `<div class="player-wrap">${t.tracks.map((tk,i)=>`
+      insertPlayerRow(btn.closest("tr"), `<div class="player-wrap">${t.tracks.map((tk,i)=>`
         <div class="player-take">
           <div class="take-label"><span>Take ${i+1}${tk.dur ? ` (${Math.round(tk.dur)}秒)` : ""}</span><a href="${SUNO_SONG}${tk.id}" target="_blank" rel="noopener">Sunoで開く ↗</a></div>
           <iframe src="${SUNO_EMBED}${tk.id}" loading="lazy" allow="autoplay; encrypted-media; fullscreen"></iframe>
-        </div>`).join("")}</div>`;
-      tr.appendChild(td);
-      btn.closest("tr").insertAdjacentElement("afterend", tr);
+        </div>`).join("")}</div>`);
     });
   });
 
